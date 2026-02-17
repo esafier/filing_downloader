@@ -1,0 +1,13 @@
+# Keep API key private - never share this file
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# IDE and tool files
+.vscode/
+.claude/
+
+# Task tracking (internal)
+tasks/
