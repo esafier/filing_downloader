@@ -11,3 +11,10 @@ __pycache__/
 
 # Task tracking (internal)
 tasks/
+
+# PyInstaller build output (rebuild with: python -m PyInstaller downloader.spec)
+build/
+dist/
+
+# Downloaded EDGAR index files (data, not code)
+*.idx
