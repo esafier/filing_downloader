@@ -7,7 +7,11 @@ __pycache__/
 
 # IDE and tool files
 .vscode/
-.claude/
+# Local Claude Code working files, except skills/commands —
+# those are tracked so they load in cloud/web sessions.
+.claude/*
+!.claude/skills/
+!.claude/commands/
 
 # Task tracking (internal)
 tasks/
