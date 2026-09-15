@@ -377,8 +377,11 @@ def _filter_batches(batches, cik, filing_type, start_year, end_year):
             batch.get("accessionNumber", []),
             batch.get("primaryDocument", []),
             batch.get("primaryDocDescription", []),
+            # 8-K item numbers, e.g. "2.02,9.01". 2.02 = results of operations,
+            # which is how we find earnings releases. Blank for other forms.
+            batch.get("items", []) or [""] * len(batch.get("form", [])),
         )
-        for form, date, report_date, accession, document, description in rows:
+        for form, date, report_date, accession, document, description, items in rows:
             if form != filing_type:
                 continue
             if not (start_year <= int(date[:4]) <= end_year):
@@ -396,6 +399,7 @@ def _filter_batches(batches, cik, filing_type, start_year, end_year):
                 "report_date": report_date or date,
                 "accession": accession,
                 "description": description,
+                "items": items or "",
                 "form": form,
                 "cik": cik,
             })
@@ -625,6 +629,94 @@ def select_filings(filings, limit):
     return unique[:limit]
 
 
+def find_press_release_url(filing):
+    """
+    Finds the press release exhibit (EX-99.1) inside an 8-K.
+
+    The 8-K's primary document is just a cover page saying "see Exhibit 99.1".
+    The actual release - the numbers and KPIs - is a separate exhibit, listed
+    on the filing's index page with its exhibit type. Returns None if there
+    isn't an HTML EX-99 exhibit.
+    """
+    accession = filing["accession"]
+    folder = f"https://www.sec.gov/Archives/edgar/data/{filing['cik']}/{accession.replace('-', '')}"
+    response = requests.get(f"{folder}/{accession}-index.htm", headers=SEC_HEADERS, timeout=30)
+    if response.status_code != 200:
+        print(f"Failed (index page status {response.status_code})", end=" ")
+        return None
+
+    # Index table columns: Seq | Description | Document | Type | Size
+    exhibits = []
+    for row in BeautifulSoup(response.text, "html.parser").find_all("tr"):
+        cells = row.find_all("td")
+        link = row.find("a")
+        if len(cells) < 4 or link is None:
+            continue
+        exhibit_type = cells[3].get_text(strip=True).upper()
+        # Inline-XBRL documents link through a viewer ("/ix?doc=/Archives/...");
+        # strip that so we fetch the raw HTML file itself.
+        href = link["href"].replace("/ix?doc=", "")
+        if exhibit_type.startswith("EX-99") and href.lower().endswith((".htm", ".html")):
+            exhibits.append((exhibit_type, f"https://www.sec.gov{href}"))
+
+    if not exhibits:
+        return None
+    # EX-99.1 is the press release by convention; EX-99.2 is often slides or
+    # a CFO commentary. Take 99.1 when present, otherwise the first EX-99.
+    for exhibit_type, url in exhibits:
+        if exhibit_type in ("EX-99.1", "EX-99.01"):
+            return url
+    return exhibits[0][1]
+
+
+def add_earnings_releases(ticker, company_name, out_dir, start_year, end_year, limits_used):
+    """
+    Adds the most recent earnings press releases to the corpus.
+
+    Releases are short and dense with KPIs and non-GAAP reconciliations that
+    often never make it into the 10-Q. They're filed as 8-Ks under Item 2.02.
+    """
+    limit = corpus.CORPUS_LIMITS["earnings releases"]
+    print("\n  Finding earnings releases (8-K Item 2.02)...")
+    eight_ks = get_filings_from_edgar(ticker, "8-K", start_year, end_year)
+    results_filings = [f for f in eight_ks if "2.02" in f.get("items", "")]
+    selected = select_filings(results_filings, limit)
+    limits_used["earnings releases"] = 0
+    if not selected:
+        print("    No earnings releases found.")
+        return []
+
+    print(f"    Found {len(results_filings)}, using the {len(selected)} most recent.")
+    written = []
+    for filing in selected:
+        print(f"    Processing release filed {filing['filing_date']}...", end=" ")
+        try:
+            url = find_press_release_url(filing)
+            if url is None:
+                print("Skipped (no EX-99 press release exhibit)")
+                continue
+            time.sleep(0.2)  # be polite to SEC.gov
+            response = requests.get(url, headers=SEC_HEADERS, timeout=60)
+            if response.status_code != 200:
+                print(f"Failed (status {response.status_code})")
+                continue
+            meta = {
+                "ticker": ticker,
+                "company": company_name,
+                "filed": filing["filing_date"],
+                "accession": filing["accession"],
+                "url": url,
+            }
+            files = corpus.process_earnings_release(response.text, meta, out_dir)
+            written.extend(files)
+            limits_used["earnings releases"] += len(files)
+            print("Done" if files else "Skipped (release text too short to be real)")
+        except Exception as error:
+            print(f"Failed ({error})")
+        time.sleep(0.5)
+    return written
+
+
 def build_claude_corpus(ticker, company_name, company_folder, start_year, end_year):
     """
     Builds the Claude Project upload set.
@@ -652,6 +744,7 @@ def build_claude_corpus(ticker, company_name, company_folder, start_year, end_ye
     print(f"  Caps: {corpus.CORPUS_LIMITS['10-K']} annual, "
           f"{corpus.CORPUS_LIMITS['10-Q']} quarterly, "
           f"{corpus.CORPUS_LIMITS['DEF 14A']} proxy, "
+          f"{corpus.CORPUS_LIMITS['earnings releases']} earnings releases, "
           f"{corpus.CORPUS_LIMITS['transcripts']} transcripts")
 
     written = []
@@ -679,6 +772,9 @@ def build_claude_corpus(ticker, company_name, company_folder, start_year, end_ye
             print("Skipped (no XBRL data).")
 
     # ---- Filings -----------------------------------------------------
+    # Period end of the newest 10-K. Stays "" if there isn't one, so every
+    # 10-Q then keeps its notes (any date string sorts after "").
+    newest_10k_period = ""
     for form in ("10-K", "10-Q", "DEF 14A"):
         limit = corpus.CORPUS_LIMITS[form]
         print(f"\n  Finding {form} filings...")
@@ -707,6 +803,19 @@ def build_claude_corpus(ticker, company_name, company_folder, start_year, end_ye
             # the most recent 10-K only; a second copy costs ~25K tokens and
             # tells you nothing new.
             skip_items = ("1",) if (form == "10-K" and position > 0) else ()
+
+            # Full notes only for the newest reports. The newest 10-K's notes
+            # already cover the prior year, and a 10-Q filed BEFORE that 10-K
+            # is superseded by it - keeping their notes too added ~55K tokens
+            # of repeated text. Later 10-Qs keep notes: they're new information.
+            if form == "10-K":
+                include_notes = position == 0
+                if position == 0:
+                    newest_10k_period = filing.get("report_date", "")
+            elif form == "10-Q":
+                include_notes = filing.get("report_date", "") > newest_10k_period
+            else:
+                include_notes = False
             try:
                 response = requests.get(filing["filing_url"], headers=SEC_HEADERS, timeout=90)
                 if response.status_code != 200:
@@ -722,7 +831,8 @@ def build_claude_corpus(ticker, company_name, company_folder, start_year, end_ye
                     "accession": filing.get("accession", ""),
                     "url": filing["filing_url"],
                 }
-                files = corpus.process_filing(response.text, meta, out_dir, skip_items)
+                files = corpus.process_filing(response.text, meta, out_dir,
+                                              skip_items, include_notes)
                 written.extend(files)
                 print(f"Done ({len(files)} section file(s))")
 
@@ -730,6 +840,10 @@ def build_claude_corpus(ticker, company_name, company_folder, start_year, end_ye
                 print(f"Failed ({error})")
 
             time.sleep(0.5)  # be polite to SEC.gov
+
+    # ---- Earnings releases (8-K Item 2.02) ---------------------------
+    written.extend(add_earnings_releases(ticker, company_name, out_dir,
+                                         start_year, end_year, limits_used))
 
     # ---- Transcripts -------------------------------------------------
     limit = corpus.CORPUS_LIMITS["transcripts"]

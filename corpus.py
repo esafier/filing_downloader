@@ -12,7 +12,8 @@ Claude Project can load into context. Claude then only sees retrieved fragments,
 so it answers as if half the corpus doesn't exist.
 
 This module fixes that four ways:
-  1. Caps the corpus (2 annual, 4 quarterly, 4 transcripts, 1 proxy).
+  1. Caps the corpus (2 annual, 4 quarterly, 1 proxy, 4 earnings releases,
+     4 transcripts).
   2. Converts HTML tables into real Markdown tables, so financial statements
      stay readable instead of collapsing into a column of orphan numbers.
   3. Splits each filing into per-section files, so retrieval pulls MD&A when
@@ -26,6 +27,7 @@ Output goes to its own folder and NEVER touches the raw Filings\\ archive.
 import re
 import time
 import requests
+from datetime import date
 from bs4 import BeautifulSoup
 
 # ============================================================
@@ -39,6 +41,7 @@ CORPUS_LIMITS = {
     "10-K": 2,
     "10-Q": 4,
     "DEF 14A": 1,
+    "earnings releases": 4,
     "transcripts": 4,
 }
 
@@ -526,111 +529,9 @@ def condense_mda(text):
     return header + "\n".join(output).strip()
 
 
-# Notes to the financial statements worth keeping. The rest are accounting
-# policy recitals that say the same thing at every company.
-NOTE_KEYWORDS = re.compile(
-    r"(segment|revenue\s+recognition|disaggregat|revenue\s+from\s+contract"
-    r"|long.term\s+debt|borrowing|credit\s+facilit"
-    r"|earnings\s+per\s+share|commitment|contingenc|acquisition)",
-    re.IGNORECASE,
-)
-
-
-def select_notes(financial_statements_text, total_budget=40000):
-    """
-    Pulls the useful notes out of Item 8.
-
-    Item 8 is mostly the audited statements plus 30-50 notes. The statements
-    themselves are already covered by the derived financials file, and most
-    notes are boilerplate, so we keep only the ones that carry analysis:
-    segments, revenue disaggregation, debt, share count, commitments.
-    """
-    lines = financial_statements_text.splitlines()
-    blocks = []
-    current = None
-    previous_kept = False
-    run_chars = 0
-
-    for line in lines:
-        stripped = line.strip()
-
-        # EVERY bold short line is a potential boundary. This matters: if we
-        # only treated keyword-matching lines as boundaries, an unwanted note
-        # sitting between two wanted ones would get absorbed into the one
-        # above it, and almost nothing would actually be filtered out.
-        is_boundary = stripped.startswith("**") and len(stripped) < 250
-
-        if is_boundary:
-            starts_new_note = bool(
-                re.match(r"^\*\*\s*(NOTE|Note)\s*\d+", stripped)
-                or re.match(r"^\*\*\s*\(\s*\d+\s*\)", stripped)
-            )
-            if NOTE_KEYWORDS.search(stripped):
-                keep = True
-                run_chars = 0  # start of a wanted note
-            elif previous_kept and not starts_new_note and run_chars < 12000:
-                # A sub-heading inside a note we're keeping - stay with it.
-                # The length bound is essential: without it, the first note we
-                # keep turns everything after it into "kept" and nothing is
-                # filtered at all.
-                keep = True
-            else:
-                keep = False
-
-            previous_kept = keep
-            if keep:
-                run_chars += len(stripped)
-            current = {"keep": keep, "lines": [stripped]}
-            blocks.append(current)
-        elif current is not None:
-            current["lines"].append(line)
-            if current["keep"]:
-                run_chars += len(line)
-
-    # A single note running to tens of thousands of characters means the
-    # boundary detection lost track. Cap it rather than ship the whole of
-    # Item 8 under a heading that says "selected".
-    MAX_NOTE_CHARS = 12000
-    kept = []
-    for block in blocks:
-        if not block["keep"]:
-            continue
-        body = "\n".join(block["lines"]).strip()
-        if len(body) > MAX_NOTE_CHARS:
-            body = body[:MAX_NOTE_CHARS] + "\n\n_[note truncated - see raw filing]_"
-        kept.append(body)
-    if not kept:
-        return None
-
-    # Hard total budget. Even after per-note caps, a filer with many
-    # qualifying notes can produce 80K+ characters, which defeats the point of
-    # a file called "selected". Notes are ordered as they appear in the filing,
-    # and the earliest ones (organization, revenue, segments) are the ones
-    # worth having, so truncating from the end loses the least.
-    budgeted = []
-    used = 0
-    dropped = 0
-    for body in kept:
-        if used + len(body) > total_budget:
-            dropped += 1
-            continue
-        budgeted.append(body)
-        used += len(body)
-
-    if not budgeted:
-        budgeted = [kept[0][:total_budget]]
-        dropped = len(kept) - 1
-
-    header = (
-        "_Selected notes only (segments, revenue recognition, debt, share count, "
-        "commitments, acquisitions). Other notes omitted as boilerplate._\n"
-    )
-    if dropped:
-        header += (
-            f"_{dropped} further qualifying note(s) omitted to stay within the "
-            "corpus size budget - see the raw filing if you need them._\n"
-        )
-    return header + "\n\n".join(budgeted)
+# Top line of every notes file. Tells the reader nothing was filtered, so a
+# missing topic means the company didn't disclose it - not that we cut it.
+NOTES_HEADER = "_All notes to the financial statements, verbatim. Nothing filtered._\n\n"
 
 
 # ============================================================
@@ -984,7 +885,7 @@ def build_financials_timeseries(cik, ticker, company_name):
         "",
         "> Segment revenue is deliberately NOT in this file. Segment data is",
         "> dimensional and Company Facts drops the dimensions, so there is no",
-        "> reliable series to pull. See the selected-notes file for segments.",
+        "> reliable series to pull. See the 10-K notes file for segments.",
         "",
         "> The quarterly table has no Q4 column. That is correct, not a gap:",
         "> companies file a 10-K instead of a Q4 10-Q, so Q4 is only ever",
@@ -1088,6 +989,7 @@ def _write(out_dir, filename, meta_fields, body, written):
         "section": meta_fields.get("section", ""),
         "form": meta_fields.get("form", ""),
         "period_end": meta_fields.get("period_end", ""),
+        "filed": meta_fields.get("filed", "") or meta_fields.get("call_date", ""),
         "source": meta_fields.get("source", ""),
         "accession": meta_fields.get("accession", ""),
     })
@@ -1106,28 +1008,35 @@ NOTES_START = re.compile(
 )
 
 
-def _statements_only(item8_text):
+def split_statements_and_notes(item_text):
     """
-    Trims Item 8 down to the statements and drops the note prose.
+    Splits the financial statements section into (statements, notes).
 
-    The full note text is enormous and mostly boilerplate; the notes we
-    actually want are extracted separately by select_notes().
+    Every note is kept, verbatim. An earlier version kept only notes matching
+    a keyword list, which silently dropped stock comp, related parties,
+    subsequent events, leases and taxes - the notes where accounting and
+    governance problems actually show up.
+
+    Splitting at ONE point means the two files can never overlap or leave a
+    gap. If the start of the notes can't be found, notes comes back None and
+    the statements file keeps everything, so nothing is ever lost.
     """
-    lines = item8_text.splitlines()
+    lines = item_text.splitlines()
     for index, line in enumerate(lines):
-        stripped = line.strip()
         # Companies write the first note four different ways, and matching
-        # only "Note 1" misses most of them - which leaves every note in the
-        # file and doubles its size.
-        if NOTES_START.match(stripped):
-            trimmed = "\n".join(lines[:index]).strip()
-            if len(trimmed) > 2000:
-                return trimmed
-            break
-    return item8_text
+        # only "Note 1" misses most of them.
+        if not NOTES_START.match(line.strip()):
+            continue
+        statements = "\n".join(lines[:index]).strip()
+        # A match this early is the section's own table of contents
+        # ("Notes to Consolidated Financial Statements ... 58"), not the real
+        # start of the notes - keep looking.
+        if len(statements) > 2000:
+            return statements, "\n".join(lines[index:]).strip()
+    return item_text, None
 
 
-def process_filing(html, meta, out_dir, skip_items=()):
+def process_filing(html, meta, out_dir, skip_items=(), include_notes=True):
     """
     Turns one filing's HTML into a handful of section files.
 
@@ -1135,6 +1044,8 @@ def process_filing(html, meta, out_dir, skip_items=()):
     skip_items lets the caller drop sections it already has from a newer
     filing - Item 1 (Business) is nearly identical year to year, so keeping
     two copies costs ~25K tokens and adds nothing.
+    include_notes=False keeps the statements but drops the notes, for older
+    filings whose notes a newer 10-K already repeats.
 
     Returns a list of written-file records for the index.
     """
@@ -1185,15 +1096,13 @@ def process_filing(html, meta, out_dir, skip_items=()):
                 continue
             body = sections[item]["text"]
             # Part I Item 1 carries the statements PLUS every note. Same
-            # treatment as the 10-K: keep the statements, keep only the notes
-            # that carry analysis, drop the accounting-policy recitals.
+            # treatment as the 10-K: statements in one file, all notes in another.
             if item == "1":
-                notes = select_notes(body, total_budget=22000)
-                if notes:
-                    _write(out_dir, f"{ticker}_{label}_10-Q_Notes_Selected.md",
-                           dict(base_fields, section="Part I Item 1 - Selected notes"),
-                           notes, written)
-                body = _statements_only(body)
+                body, notes = split_statements_and_notes(body)
+                if notes and include_notes:
+                    _write(out_dir, f"{ticker}_{label}_10-Q_Notes.md",
+                           dict(base_fields, section="Part I Item 1 - Notes (all)"),
+                           NOTES_HEADER + notes, written)
             elif item == "2" and CONDENSE_MDA:
                 body = condense_mda(body)
             _write(out_dir, f"{ticker}_{label}_10-Q_{suffix}.md",
@@ -1237,13 +1146,12 @@ def process_filing(html, meta, out_dir, skip_items=()):
             mda_parts.append(body)
             continue
         elif mode == "financials":
-            # Item 8 splits into the statements plus the notes worth keeping
-            notes = select_notes(body)
-            if notes:
-                _write(out_dir, f"{ticker}_{label}_{form}_08N_Notes_Selected.md",
-                       dict(base_fields, section="Item 8 - Selected notes"),
-                       notes, written)
-            body = _statements_only(body)
+            # Item 8 splits into the statements plus every note
+            body, notes = split_statements_and_notes(body)
+            if notes and include_notes:
+                _write(out_dir, f"{ticker}_{label}_{form}_08N_Notes.md",
+                       dict(base_fields, section="Item 8 - Notes (all)"),
+                       NOTES_HEADER + notes, written)
 
         if item == "7":
             mda_parts.insert(0, body)
@@ -1260,6 +1168,48 @@ def process_filing(html, meta, out_dir, skip_items=()):
                dict(base_fields, section="Item 7/7A - MD&A and market risk"),
                mda_body, written)
 
+    return written
+
+
+def process_earnings_release(html, meta, out_dir):
+    """
+    Writes one earnings press release (8-K exhibit 99.1) as a single file.
+
+    Kept whole: releases are short, and the KPI tables and non-GAAP
+    reconciliations are the reason to have them at all.
+
+    meta needs: ticker, company, filed, accession, url.
+    """
+    written = []
+    body = html_to_markdown(html)
+    # EDGAR wraps exhibits in a few lines of filing metadata ("EX-99.1",
+    # the file name, "Document") that land at the very top. Peel them off.
+    lines = body.splitlines()
+    while lines and (not lines[0].strip()
+                     or lines[0].strip().upper().startswith("EX-99")
+                     or lines[0].strip().lower().endswith((".htm", ".html"))
+                     or lines[0].strip() == "Document"):
+        lines.pop(0)
+    body = "\n".join(lines)
+    # Anything this short is a cover page or a broken exhibit, not a release
+    if len(body) < MIN_SECTION_CHARS * 2:
+        return written
+
+    ticker = meta["ticker"]
+    fields = {
+        "ticker": ticker,
+        "company": meta.get("company", ""),
+        "form": "8-K Item 2.02 - earnings release (EX-99.1)",
+        # 8-Ks carry no fiscal period, and guessing it from the date is how
+        # wrong labels happen. The quarter is stated in the release's headline.
+        "period_end": f"see headline (released {meta['filed']})",
+        "filed": meta.get("filed", ""),
+        "accession": meta.get("accession", ""),
+        "source": meta.get("url", ""),
+        "section": "Earnings press release (full)",
+    }
+    _write(out_dir, f"{ticker}_REL{meta['filed']}_EarningsRelease.md",
+           fields, body, written)
     return written
 
 
@@ -1304,12 +1254,31 @@ def write_index(out_dir, ticker, company_name, written, limits_used):
     """
     total_chars = sum(item["chars"] for item in written)
     approx_tokens = total_chars // 4
+    # Newest document date across the corpus. Anything the company released
+    # after this is not here - that's the cue to check a live source.
+    dates = [item.get("filed", "") for item in written]
+    newest = max((d for d in dates if d[:4].isdigit()), default="unknown")
+
+    # Built from the files actually written, not from a description of the
+    # rule - an index that describes a filter drifts away from the filter.
+    notes_files = [item for item in written if "Notes (all)" in item["section"]]
+    notes_periods = ", ".join(
+        f"{item['form']} {item['period_end']}"
+        for item in sorted(notes_files, key=lambda i: i["period_end"])
+    )
+    notes_line = (
+        f"- **Full notes, verbatim, for the newest reports only:** {notes_periods or 'none'}.\n"
+        "  Older 10-Ks and 10-Qs keep their statements but not their notes - the\n"
+        "  newest 10-K repeats the prior year. Within those `Notes` files nothing is\n"
+        "  filtered, so a topic missing there wasn't disclosed."
+    )
 
     lines = [
         f"# {ticker} - {company_name}: corpus index",
         "",
         "Read this first. It lists every document in this project and what it covers.",
         "",
+        f"- **As of:** built {date.today().isoformat()}; newest document dated {newest}",
         f"- Files: {len(written)}",
         f"- Total size: {total_chars:,} characters (roughly {approx_tokens:,} tokens)",
         "",
@@ -1318,6 +1287,7 @@ def write_index(out_dir, ticker, company_name, written, limits_used):
         f"- Annual reports: {limits_used.get('10-K', 0)}",
         f"- Quarterly reports: {limits_used.get('10-Q', 0)}",
         f"- Proxy statements: {limits_used.get('DEF 14A', 0)}",
+        f"- Earnings press releases: {limits_used.get('earnings releases', 0)}",
         f"- Earnings call transcripts: {limits_used.get('transcripts', 0)}",
         "",
         "## Files",
@@ -1339,16 +1309,26 @@ def write_index(out_dir, ticker, company_name, written, limits_used):
         "- **Risk factors are condensed** to their headings plus the first sentence",
         "  of each. The headings carry the substance; the paragraphs beneath are",
         "  templated legal hedging.",
-        "- **Most notes to the financial statements are dropped.** Kept: segments,",
-        "  revenue recognition, debt, share count, commitments, taxes, leases.",
+        notes_line,
+        "- **Business (Item 1) is kept from the newest 10-K only**; it barely",
+        "  changes year to year.",
+        "- **10-Qs keep only MD&A, the financial statements and their notes** - the",
+        "  rest repeats the 10-K nearly verbatim.",
+        "- **Proxy keeps comp, ownership and governance sections**; the",
+        "  meeting-logistics half is dropped.",
         "- **Dropped entirely:** exhibit indexes, signature pages, auditor consents,",
-        "  cover-page checkboxes, internal-controls boilerplate, and the",
-        "  meeting-logistics half of the proxy.",
-        "- **10-Qs keep only MD&A and the financial statements** - the rest repeats",
-        "  the 10-K nearly verbatim.",
+        "  cover-page checkboxes, internal-controls boilerplate, and 10-K items not",
+        "  listed above (properties, mine safety, market for equity, etc.).",
         "",
         "If you need something that was cut, the full filings are archived separately",
         "under the Filings folder and can be added back.",
+        "",
+        "## Not included - use Quartr (or another live source) for these",
+        "",
+        "- Earnings slide decks and investor presentations",
+        "- Conference, fireside chat and investor day transcripts",
+        "- Anything released after the as-of date above",
+        "- Other 8-Ks (deals, executive changes, financings) and Form 4 insider filings",
         "",
     ]
 
