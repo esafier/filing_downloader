@@ -1,12 +1,27 @@
 """
 SEC Filing & Earnings Transcript Downloader
 ============================================
-Downloads 10-K, 10-Q, DEF 14A (proxy statement) filings and earnings call transcripts
-for any public company using API Ninja's APIs.
+Downloads 10-K, 10-Q, DEF 14A (proxy statement) and 20-F filings plus earnings
+call transcripts for any public company.
 
-OUTPUT STRUCTURE (post May-2026 migration):
+Filings come from SEC EDGAR (free, official, no API key). The API Ninjas key is
+optional and only used for earnings transcripts.
+
+TWO MODES
+---------
+Menu options 1-5 build the RAW ARCHIVE: one big plain-text file per document,
+under Filings\\. Complete but enormous - a single 10-K is ~600K characters.
+
+Menu option 6 builds the CLAUDE PROJECT CORPUS: the same source documents
+turned into small, labelled Markdown files under "Claude Project Knowledge\\".
+Upload that folder to a Claude Project. It is roughly half the size, keeps
+financial tables readable, and splits each filing by section so Claude
+retrieves the right part. See corpus.py for how and why.
+
+OUTPUT STRUCTURE:
   C:\\Users\\ely\\OneDrive\\Tickers\\<TICKER - Company Name>\\
-    ├── Filings\\
+    ├── Claude Project Knowledge\\   <-- option 6; upload THIS to Claude
+    ├── Filings\\                    <-- options 1-5; the raw archive
     │   ├── 10-K\\
     │   ├── 10-Q\\
     │   ├── DEF 14A\\
@@ -20,6 +35,9 @@ OUTPUT STRUCTURE (post May-2026 migration):
     │   └── Reaction\\
     └── _Links.md
 
+The corpus folder is wiped and rebuilt on each run so stale files can never
+end up in an upload. Filings\\ is never touched by option 6.
+
 When a new ticker is downloaded for the first time, the full canonical
 structure is auto-created. Existing ticker folders are preserved.
 
@@ -31,9 +49,14 @@ import re
 import sys
 import time
 import requests
+from datetime import date
 from pathlib import Path
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+
+# Our own module: turns raw filings into the compact Markdown corpus that
+# actually fits inside a Claude Project. See corpus.py for the why.
+import corpus
 
 # ============================================================
 # CONFIGURATION
@@ -184,10 +207,19 @@ def validate_ticker(ticker):
     """
     print(f"\n  Looking up {ticker.upper()}...")
 
+    # No API key? Fall back to SEC's own company list, which carries the
+    # company name and needs no key. Keeps the tool usable without a key.
+    if not API_KEY or API_KEY == "your_api_key_here":
+        name = get_company_name_from_sec(ticker)
+        if name:
+            print(f"  Found: {name} (via SEC EDGAR)")
+        return name
+
     result = call_api("ticker", {"ticker": ticker.upper()})
 
+    # API Ninjas failed for some reason - try EDGAR before giving up
     if result is None:
-        return None
+        return get_company_name_from_sec(ticker)
 
     # The API returns a list - empty means ticker not found
     if isinstance(result, list) and len(result) == 0:
@@ -209,6 +241,36 @@ def validate_ticker(ticker):
 # SEC EDGAR FALLBACK (free, official, no API key needed)
 # ============================================================
 
+# Caches so we don't re-download the same big files repeatedly within one run.
+# company_tickers.json is ~1MB and was previously fetched once PER FILING TYPE,
+# so a "download all" run pulled it four times for no reason.
+_CIK_CACHE = {}
+_SUBMISSIONS_CACHE = {}
+
+
+def get_company_name_from_sec(ticker):
+    """
+    Gets a company's name from SEC's public ticker list (no API key needed).
+
+    Used when API Ninjas is unavailable or no key is configured, so that a
+    missing key never blocks the tool.
+    """
+    url = "https://www.sec.gov/files/company_tickers.json"
+    try:
+        response = requests.get(url, headers=SEC_HEADERS, timeout=30)
+        if response.status_code != 200:
+            return None
+        for entry in response.json().values():
+            if entry.get("ticker", "").upper() == ticker.upper():
+                _CIK_CACHE[ticker.upper()] = int(entry["cik_str"])
+                return entry.get("title", "Unknown Company")
+    except requests.exceptions.RequestException:
+        return None
+
+    print(f"  Ticker '{ticker.upper()}' not found in SEC's company list.")
+    return None
+
+
 def get_cik_for_ticker(ticker):
     """
     Looks up a company's CIK number from SEC's public ticker list.
@@ -217,6 +279,10 @@ def get_cik_for_ticker(ticker):
     EDGAR organizes everything by CIK, not ticker. This mapping file is
     free and public, no API key needed.
     """
+    ticker = ticker.upper()
+    if ticker in _CIK_CACHE:
+        return _CIK_CACHE[ticker]
+
     url = "https://www.sec.gov/files/company_tickers.json"
 
     try:
@@ -226,8 +292,9 @@ def get_cik_for_ticker(ticker):
             return None
         # The file is a dict of {"0": {"cik_str": ..., "ticker": ..., "title": ...}, ...}
         for entry in response.json().values():
-            if entry.get("ticker", "").upper() == ticker.upper():
-                return int(entry["cik_str"])
+            if entry.get("ticker", "").upper() == ticker:
+                _CIK_CACHE[ticker] = int(entry["cik_str"])
+                return _CIK_CACHE[ticker]
     except requests.exceptions.RequestException as error:
         print(f"  ERROR: SEC ticker lookup failed ({error})")
         return None
@@ -240,14 +307,21 @@ def get_filings_from_edgar(ticker, filing_type, start_year, end_year):
     """
     Gets a company's filing list straight from SEC EDGAR (data.sec.gov).
 
-    This is the fallback for when API Ninjas' /sec endpoint is down.
-    Returns the same shape as the API Ninjas response — a list of
-    {'filing_date': ..., 'filing_url': ...} dicts — so the download
-    code doesn't care which source the list came from.
+    EDGAR is the only lookup source — free, official, no API key, and it's
+    where the documents live anyway. Returns a list of dicts carrying the
+    filing date, the fiscal period end (report_date), the accession number,
+    and the document URL.
     """
     cik = get_cik_for_ticker(ticker)
     if cik is None:
         return []
+
+    # Reuse the submissions data if we already pulled it this run. Without
+    # this, downloading 10-K + 10-Q + DEF 14A refetches the same JSON 3 times.
+    cache_key = (cik, start_year, end_year)
+    if cache_key in _SUBMISSIONS_CACHE:
+        return _filter_batches(_SUBMISSIONS_CACHE[cache_key], cik, filing_type,
+                               start_year, end_year)
 
     # EDGAR's submissions API: one JSON per company, CIK zero-padded to 10 digits
     url = f"https://data.sec.gov/submissions/CIK{cik:010d}.json"
@@ -280,6 +354,18 @@ def get_filings_from_edgar(ticker, filing_type, start_year, end_year):
             except requests.exceptions.RequestException:
                 pass  # skip an archive we can't fetch; keep what we have
 
+    _SUBMISSIONS_CACHE[cache_key] = batches
+    return _filter_batches(batches, cik, filing_type, start_year, end_year)
+
+
+def _filter_batches(batches, cik, filing_type, start_year, end_year):
+    """
+    Pulls one form type out of EDGAR's submission batches.
+
+    Split out from get_filings_from_edgar so the (expensive) download and the
+    (cheap) filtering can be cached separately — we fetch the company's
+    submissions once and then filter it per form type.
+    """
     # EDGAR stores filings as parallel columns (all forms in one list, all
     # dates in another, etc.) — zip() walks them together row by row
     filings = []
@@ -287,10 +373,12 @@ def get_filings_from_edgar(ticker, filing_type, start_year, end_year):
         rows = zip(
             batch.get("form", []),
             batch.get("filingDate", []),
+            batch.get("reportDate", []),
             batch.get("accessionNumber", []),
             batch.get("primaryDocument", []),
+            batch.get("primaryDocDescription", []),
         )
-        for form, date, accession, document in rows:
+        for form, date, report_date, accession, document, description in rows:
             if form != filing_type:
                 continue
             if not (start_year <= int(date[:4]) <= end_year):
@@ -302,6 +390,14 @@ def get_filings_from_edgar(ticker, filing_type, start_year, end_year):
             filings.append({
                 "filing_date": date,
                 "filing_url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_clean}/{document}",
+                # Keep the rest of what EDGAR gave us. report_date is the fiscal
+                # PERIOD END, which is what we label files with — filing_date is
+                # just when it was submitted and is often months later.
+                "report_date": report_date or date,
+                "accession": accession,
+                "description": description,
+                "form": form,
+                "cik": cik,
             })
 
     # Newest first, same as the API
@@ -324,25 +420,12 @@ def download_sec_filings(ticker, filing_type, start_year, end_year, company_fold
     """
     print(f"\n  Searching for {filing_type} filings ({start_year}-{end_year})...")
 
-    # Build the date range for the API (Jan 1 of start year to Dec 31 of end year)
-    params = {
-        "ticker": ticker.upper(),
-        # API Ninjas wants form types without spaces ('DEF14A'), but folders
-        # and EDGAR both use the official name with the space ('DEF 14A')
-        "filing": filing_type.replace(" ", ""),
-        "start": f"{start_year}-01-01",
-        "end": f"{end_year}-12-31",
-        "limit": 100  # Get up to 100 filings (premium feature)
-    }
-
-    filings = call_api("sec", params)
-
-    # Fallback: if API Ninjas errored or came back empty, ask SEC EDGAR directly.
-    # EDGAR is the official source (free, no key) — it's where the documents
-    # live anyway, so this keeps working even when API Ninjas is down.
-    if not filings:
-        print("  API Ninjas lookup failed or empty - trying SEC EDGAR directly...")
-        filings = get_filings_from_edgar(ticker, filing_type, start_year, end_year)
+    # EDGAR is the only lookup source now. API Ninjas' /sec endpoint has
+    # returned 400 on every request since mid-2026 (see tasks/lessons.md), and
+    # it only ever supplied URLs — the documents always came from SEC.gov
+    # anyway. Going EDGAR-only also guarantees every filing carries its full
+    # metadata (period end, accession), which the corpus builder needs.
+    filings = get_filings_from_edgar(ticker, filing_type, start_year, end_year)
 
     if len(filings) == 0:
         print(f"  No {filing_type} filings found for that date range.")
@@ -515,6 +598,202 @@ def download_transcripts(ticker, start_year, end_year, company_folder):
 
 
 # ============================================================
+# CLAUDE PROJECT CORPUS BUILDER
+# ============================================================
+
+def select_filings(filings, limit):
+    """
+    Picks which filings actually make it into the corpus.
+
+    Two jobs:
+      1. Deduplicate by fiscal period. A company that amends a 10-K files it
+         twice for the same period; without this we'd burn a slot on the
+         duplicate. We keep whichever was filed LAST (the amended version).
+      2. Cap the count. This is what keeps the corpus inside the token budget
+         no matter how wide a year range the user typed.
+    """
+    by_period = {}
+    for filing in filings:
+        period = filing.get("report_date") or filing.get("filing_date")
+        existing = by_period.get(period)
+        if existing is None or filing.get("filing_date", "") > existing.get("filing_date", ""):
+            by_period[period] = filing
+
+    unique = sorted(by_period.values(),
+                    key=lambda f: f.get("report_date") or f.get("filing_date"),
+                    reverse=True)
+    return unique[:limit]
+
+
+def build_claude_corpus(ticker, company_name, company_folder, start_year, end_year):
+    """
+    Builds the Claude Project upload set.
+
+    Writes to its own folder, wiped and rebuilt each run so a stale file from
+    a previous run can never sneak into an upload. The raw Filings\\ archive
+    is never touched.
+    """
+    out_dir = company_folder / corpus.CORPUS_FOLDER_NAME
+
+    # Wipe and rebuild. Only ever deletes .md files inside our own folder —
+    # if anything else is in there, leave it alone and say so.
+    if out_dir.exists():
+        for existing in out_dir.iterdir():
+            if existing.is_file() and existing.suffix.lower() == ".md":
+                existing.unlink()
+            else:
+                print(f"  NOTE: leaving non-Markdown file in place: {existing.name}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n" + "-" * 60)
+    print("  BUILDING CLAUDE PROJECT CORPUS")
+    print("-" * 60)
+    print(f"  Output: {out_dir}")
+    print(f"  Caps: {corpus.CORPUS_LIMITS['10-K']} annual, "
+          f"{corpus.CORPUS_LIMITS['10-Q']} quarterly, "
+          f"{corpus.CORPUS_LIMITS['DEF 14A']} proxy, "
+          f"{corpus.CORPUS_LIMITS['transcripts']} transcripts")
+
+    written = []
+    limits_used = {}
+
+    # ---- Derived financials (the single most valuable file) ----------
+    cik = get_cik_for_ticker(ticker)
+    if cik is not None:
+        print("\n  Building financial statement time series from SEC XBRL...", end=" ")
+        financials = corpus.build_financials_timeseries(cik, ticker, company_name)
+        if financials:
+            path = out_dir / f"{ticker}_00_Financials_Timeseries.md"
+            path.write_text(financials, encoding="utf-8")
+            written.append({
+                "filename": path.name,
+                "chars": len(financials),
+                "section": "Derived financial statements",
+                "form": "XBRL",
+                "period_end": "multi-period",
+                "source": f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
+                "accession": "",
+            })
+            print("Done!")
+        else:
+            print("Skipped (no XBRL data).")
+
+    # ---- Filings -----------------------------------------------------
+    for form in ("10-K", "10-Q", "DEF 14A"):
+        limit = corpus.CORPUS_LIMITS[form]
+        print(f"\n  Finding {form} filings...")
+        found = get_filings_from_edgar(ticker, form, start_year, end_year)
+
+        # If nothing in the requested window, widen it — a corpus missing its
+        # annual report is not worth shipping just because the years were off.
+        if not found and form == "10-K":
+            print("    None in range; widening search to the last 5 years...")
+            found = get_filings_from_edgar(ticker, form, end_year - 5, end_year)
+
+        selected = select_filings(found, limit)
+        if not selected:
+            print(f"    No {form} found.")
+            limits_used[form] = 0
+            continue
+
+        print(f"    Found {len(found)}, using the {len(selected)} most recent.")
+        limits_used[form] = len(selected)
+
+        for position, filing in enumerate(selected):
+            period = filing.get("report_date", "?")
+            print(f"    Processing {form} (period end {period})...", end=" ")
+
+            # Item 1 (Business) is near-identical year to year. Keep it from
+            # the most recent 10-K only; a second copy costs ~25K tokens and
+            # tells you nothing new.
+            skip_items = ("1",) if (form == "10-K" and position > 0) else ()
+            try:
+                response = requests.get(filing["filing_url"], headers=SEC_HEADERS, timeout=90)
+                if response.status_code != 200:
+                    print(f"Failed (status {response.status_code})")
+                    continue
+
+                meta = {
+                    "ticker": ticker,
+                    "company": company_name,
+                    "form": form,
+                    "report_date": filing.get("report_date", ""),
+                    "filed": filing.get("filing_date", ""),
+                    "accession": filing.get("accession", ""),
+                    "url": filing["filing_url"],
+                }
+                files = corpus.process_filing(response.text, meta, out_dir, skip_items)
+                written.extend(files)
+                print(f"Done ({len(files)} section file(s))")
+
+            except Exception as error:
+                print(f"Failed ({error})")
+
+            time.sleep(0.5)  # be polite to SEC.gov
+
+    # ---- Transcripts -------------------------------------------------
+    limit = corpus.CORPUS_LIMITS["transcripts"]
+    if not API_KEY:
+        print("\n  Skipping transcripts (no API Ninjas key set in .env).")
+        limits_used["transcripts"] = 0
+    else:
+        print("\n  Finding earnings transcripts...")
+        available = find_available_transcripts(ticker, start_year, end_year)
+        # Newest first, then cap
+        available = sorted(set(available),
+                           key=lambda yq: (int(yq[0]), int(yq[1])),
+                           reverse=True)[:limit]
+
+        if not available:
+            print("    No transcripts found.")
+            limits_used["transcripts"] = 0
+        else:
+            print(f"    Using the {len(available)} most recent.")
+            limits_used["transcripts"] = len(available)
+
+            for year, quarter in available:
+                print(f"    Processing Q{quarter} {year}...", end=" ")
+                result = call_api("earningstranscript", {
+                    "ticker": ticker.upper(), "year": year, "quarter": quarter,
+                })
+                if result is None:
+                    print("Failed (API error)")
+                    continue
+                text = result.get("transcript", "")
+                if not text:
+                    print("Failed (empty)")
+                    continue
+
+                meta = {
+                    "ticker": ticker,
+                    "company": company_name,
+                    "year": year,
+                    "quarter": quarter,
+                    "date": result.get("date", ""),
+                }
+                files = corpus.process_transcript(text, meta, out_dir)
+                written.extend(files)
+                print(f"Done ({len(files)} file(s))")
+                time.sleep(0.3)
+
+    # ---- Index -------------------------------------------------------
+    corpus.write_index(out_dir, ticker, company_name, written, limits_used)
+
+    total_chars = sum(item["chars"] for item in written)
+    print("\n" + "=" * 60)
+    print(f"  CORPUS BUILT: {len(written) + 1} file(s)")
+    print(f"  Size: {total_chars:,} chars (roughly {total_chars // 4:,} tokens)")
+    if total_chars // 4 > 250000:
+        print("  WARNING: over the ~250K token target. Lower the caps in")
+        print("           corpus.py (CORPUS_LIMITS) if Claude misses content.")
+    print(f"  Folder: {out_dir}")
+    print("\n  Upload the WHOLE folder to your Claude Project.")
+    print("=" * 60)
+
+    return len(written) + 1
+
+
+# ============================================================
 # MAIN MENU & USER INTERACTION
 # ============================================================
 
@@ -525,7 +804,9 @@ def get_year_range():
 
     Includes basic validation so you can't enter 'abc' or year 1800.
     """
-    current_year = 2026  # Update this if running in a future year
+    # Read the year from the clock. This used to be hardcoded, which silently
+    # blocked filings once the calendar rolled past it.
+    current_year = date.today().year
 
     while True:
         start_input = input("\n  Start year (e.g., 2020): ").strip()
@@ -559,18 +840,19 @@ def get_download_choice():
     """
     Shows a menu of what to download and returns the user's choice.
     """
-    print("\n  What would you like to download?")
+    print("\n  What would you like to do?")
     print("  1. 10-K filings (annual reports)")
     print("  2. 10-Q filings (quarterly reports)")
     print("  3. DEF 14A filings (proxy statements)")
     print("  4. Earnings call transcripts")
-    print("  5. All of the above")
+    print("  5. All of the above (raw text archive)")
+    print("  6. Build Claude Project corpus  <-- use this one for AI research")
 
     while True:
-        choice = input("\n  Enter your choice (1-5): ").strip()
-        if choice in ("1", "2", "3", "4", "5"):
+        choice = input("\n  Enter your choice (1-6): ").strip()
+        if choice in ("1", "2", "3", "4", "5", "6"):
             return choice
-        print("  Please enter 1, 2, 3, 4, or 5.")
+        print("  Please enter a number from 1 to 6.")
 
 
 def find_existing_ticker_folder(ticker_root, ticker):
@@ -612,25 +894,14 @@ def ensure_canonical_structure(company_folder, ticker, company_name):
         )
 
 
-def main():
+def run_one_company():
     """
-    The main function that runs when you execute the script.
-    Walks you through the whole process step by step.
+    Runs the whole flow for a single ticker.
+
+    Split out from main() so main() can loop. It used to call itself
+    recursively for "download another company", which grew the call stack
+    with every company you did.
     """
-    print("\n" + "="*60)
-    print("  SEC Filing & Earnings Transcript Downloader")
-    print("="*60)
-
-    # Check that the API key is set up
-    if not API_KEY or API_KEY == "your_api_key_here":
-        print("\n  First-time setup needed!")
-        print("  1. Open the .env file in this folder")
-        print("  2. Replace 'your_api_key_here' with your API Ninja's key")
-        print("  3. Save the file and run this script again")
-        print(f"\n  .env file location: {Path(__file__).parent / '.env'}")
-        sys.exit(1)
-
-    # Output directory: always OneDrive\Tickers (post May-2026 reorg).
     output_dir = TICKERS_DIR
     print(f"\n  Output folder: {output_dir}")
 
@@ -642,35 +913,38 @@ def main():
             print("  Please enter a ticker symbol.")
             continue
 
-        # Validate the ticker and get the company name
         company_name = validate_ticker(ticker)
 
         if company_name is None:
             retry = input("  Try another ticker? (y/n): ").strip().lower()
             if retry != "y":
-                print("\n  Goodbye!")
-                sys.exit(0)
+                return False
             continue
 
-        # Confirm with the user
-        confirm = input(f"  Is this correct? (y/n): ").strip().lower()
+        confirm = input("  Is this correct? (y/n): ").strip().lower()
         if confirm == "y":
             break
 
-    # Step 2: Choose what to download
+    # Step 2: Choose what to do
     choice = get_download_choice()
 
-    # Step 2b: Ask about 20-F (foreign issuer annual reports) — separate from the main menu
-    # because most users won't need it, but it can be combined with any choice above
-    include_20f = input("\n  Also download 20-F filings (foreign issuer annual reports)? (y/n): ").strip().lower()
-    include_20f = include_20f in ("y", "yes")
+    # Step 3: Work out the year range.
+    # The corpus builder picks its own window - it caps by COUNT, not by year,
+    # so asking the user for years would just be a way to get it wrong.
+    if choice == "6":
+        end_year = date.today().year
+        start_year = end_year - 3
+        include_20f = False
+        print(f"\n  Searching {start_year}-{end_year}, keeping the most recent of each.")
+    else:
+        include_20f = input(
+            "\n  Also download 20-F filings (foreign issuer annual reports)? (y/n): "
+        ).strip().lower() in ("y", "yes")
+        start_year, end_year = get_year_range()
 
-    # Step 3: Get the year range
-    start_year, end_year = get_year_range()
-
-    # Set up the company folder. First check for an EXISTING folder for this ticker
-    # (matching by 'TICKER - ' prefix) so we don't create a duplicate when the API's
-    # company name differs from the user's existing folder name.
+    # Set up the company folder. Check for an EXISTING folder for this ticker
+    # first so we don't create a duplicate when the API's company name differs
+    # from the folder name already on disk.
     existing_name = find_existing_ticker_folder(output_dir, ticker)
     if existing_name:
         company_folder = output_dir / existing_name
@@ -680,53 +954,68 @@ def main():
         company_folder = output_dir / f"{ticker} - {safe_name}"
         print(f"\n  Creating new folder: {company_folder.name}")
 
-    # Ensure full canonical structure exists in the company folder
-    # (Filings\<type>\, Models\, Memos & Theses\, Earnings\Prep|Reaction\, _Links.md).
     ensure_canonical_structure(company_folder, ticker, company_name)
 
     print(f"\n  Saving to: {company_folder}")
     print("-" * 60)
 
-    # Step 4: Download based on the user's choice
+    # Step 4: Do the work
+    if choice == "6":
+        build_claude_corpus(ticker, company_name, company_folder, start_year, end_year)
+        return True
+
     total_files = 0
 
     if choice in ("1", "5"):
-        # Download 10-K filings
-        count = download_sec_filings(ticker, "10-K", start_year, end_year, company_folder)
-        total_files += count
+        total_files += download_sec_filings(ticker, "10-K", start_year, end_year, company_folder)
 
     if choice in ("2", "5"):
-        # Download 10-Q filings
-        count = download_sec_filings(ticker, "10-Q", start_year, end_year, company_folder)
-        total_files += count
+        total_files += download_sec_filings(ticker, "10-Q", start_year, end_year, company_folder)
 
     if choice in ("3", "5"):
-        # Download DEF 14A filings (proxy statements)
-        count = download_sec_filings(ticker, "DEF 14A", start_year, end_year, company_folder)
-        total_files += count
+        total_files += download_sec_filings(ticker, "DEF 14A", start_year, end_year, company_folder)
 
     if choice in ("4", "5"):
-        # Download earnings transcripts
-        count = download_transcripts(ticker, start_year, end_year, company_folder)
-        total_files += count
+        total_files += download_transcripts(ticker, start_year, end_year, company_folder)
 
     if include_20f:
-        # Download 20-F filings (annual reports for foreign issuers like Alibaba, Toyota, etc.)
-        count = download_sec_filings(ticker, "20-F", start_year, end_year, company_folder)
-        total_files += count
+        total_files += download_sec_filings(ticker, "20-F", start_year, end_year, company_folder)
 
-    # Step 5: Show the final summary
     print("\n" + "=" * 60)
     print(f"  DONE! {total_files} file(s) saved.")
     print(f"  Location: {company_folder}")
     print("=" * 60)
+    return True
 
-    # Ask if they want to download for another company
-    again = input("\n  Download for another company? (y/n): ").strip().lower()
-    if again == "y":
-        main()  # Run the whole thing again
-    else:
-        print("\n  Goodbye!\n")
+
+def main():
+    """
+    The main function that runs when you execute the script.
+    Loops so you can do several companies in one sitting.
+    """
+    print("\n" + "=" * 60)
+    print("  SEC Filing & Earnings Transcript Downloader")
+    print("=" * 60)
+
+    # The API Ninjas key is now OPTIONAL. Filings come from SEC EDGAR, which
+    # needs no key at all; the key is only used for earnings transcripts.
+    # Previously the script refused to start without it, which blocked the
+    # whole tool over a feature most runs don't need.
+    if not API_KEY or API_KEY == "your_api_key_here":
+        print("\n  NOTE: No API Ninjas key found in .env.")
+        print("  SEC filings will still work - they come from EDGAR, no key needed.")
+        print("  Earnings transcripts will be skipped.")
+        print(f"  To enable transcripts, add your key to: {Path(__file__).parent / '.env'}")
+
+    while True:
+        completed = run_one_company()
+        if not completed:
+            break
+        again = input("\n  Do another company? (y/n): ").strip().lower()
+        if again != "y":
+            break
+
+    print("\n  Goodbye!\n")
 
 
 # This is the entry point - runs main() when you execute "python downloader.py"
