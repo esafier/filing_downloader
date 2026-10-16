@@ -255,3 +255,34 @@ def test_accession_record_round_trips_through_json(tmp_path):
     rec = accession_record("8-K", filing("8-K", "R1", "2025-08-27"), ["TST_REL2025-08-27_EarningsRelease.md"])
     assert json.loads(json.dumps(rec)) == rec
     assert rec["form"] == "8-K" and rec["filed"] == "2025-08-27"
+
+
+# ------------------------------------------------------------------
+# Review fixes: coverage counts processed filings; a kept filing whose role
+# grew is rebuilt whole
+# ------------------------------------------------------------------
+
+def test_coverage_counts_only_filings_that_produced_files():
+    k1, k2 = filing("10-K", "K1", "2025-12-31"), filing("10-K", "K2", "2024-12-31")
+    plan = {"10-K": [k1, k2], "8-K": [filing("8-K", "R1", "2025-11-19")]}
+    records = [accession_record("10-K", k1, fake_files("10-K", k1)),
+               accession_record("8-K", plan["8-K"][0], [])]  # release had no exhibit
+    assert build._limits_used(plan, records) == {"10-K": 1, "earnings releases": 0}
+
+
+def test_kept_10q_regains_notes_when_the_newer_10k_falls_away(ticker_folder):
+    k1 = filing("10-K", "K1", "2025-12-31")
+    q1 = filing("10-Q", "Q1", "2025-09-30")  # older than K1: built without notes
+    ticker_folder["plan"] = {"10-K": [k1], "10-Q": [q1]}
+    profile = ticker_folder["profile"]
+    build.refresh_corpus(ticker_folder["folder"], profile)
+    assert not (ticker_folder["corpus"] / "TST_QE2025-09-30_10-Q_Notes.md").exists()
+
+    # The 10-K drops out of the plan (year window moved); Q1 is now the
+    # newest report and must get its notes back.
+    ticker_folder["plan"] = {"10-K": [], "10-Q": [q1]}
+    summary = build.refresh_corpus(ticker_folder["folder"], profile)
+    assert "TST_QE2025-09-30_10-Q_Notes.md" in summary["added"]
+    assert (ticker_folder["corpus"] / "TST_QE2025-09-30_10-Q_Notes.md").exists()
+    q1_record = next(r for r in profile["accessions"] if r["accession"] == "Q1")
+    assert any(name.endswith("_10-Q_Notes.md") for name in q1_record["files"])

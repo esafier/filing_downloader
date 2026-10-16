@@ -119,19 +119,36 @@ def filing_flags(kind, filing, plan):
     return (), False
 
 
-def superseded_suffixes(kind, filing, plan):
+def _role_suffixes(kind, filing, plan):
     """
-    Filename endings a KEPT filing must lose because a newer 10-K arrived:
-    the old 10-K's Business and Notes, or a 10-Q's Notes once it predates
-    the newest 10-K. Keeps an incremental corpus identical to a rebuild.
+    (lose, need): filename endings a filing must NOT have and MUST have in
+    its current role. Business and the full notes belong to the newest 10-K
+    only; a 10-Q keeps its notes only while it is newer than that 10-K.
     """
     skip_items, include_notes = filing_flags(kind, filing, plan)
-    endings = []
-    if kind == "10-K" and skip_items:
-        endings.append("_01_Business.md")
-    if kind in ("10-K", "10-Q") and not include_notes:
-        endings.append("_08N_Notes.md" if kind == "10-K" else "_10-Q_Notes.md")
-    return tuple(endings)
+    notes_ending = "_08N_Notes.md" if kind == "10-K" else "_10-Q_Notes.md"
+    lose, need = [], []
+    if kind == "10-K":
+        (lose if skip_items else need).append("_01_Business.md")
+    if kind in ("10-K", "10-Q"):
+        (need if include_notes else lose).append(notes_ending)
+    return tuple(lose), tuple(need)
+
+
+def superseded_suffixes(kind, filing, plan):
+    """Endings a KEPT filing must lose because a newer 10-K arrived."""
+    return _role_suffixes(kind, filing, plan)[0]
+
+
+def needs_reprocessing(kind, filing, plan, record):
+    """
+    True when a kept filing's role grew (it became the newest 10-K, or a
+    10-Q now outranks the newest 10-K) and the files that role requires are
+    not in its record. The whole filing is then re-downloaded, since the
+    section text is not kept locally.
+    """
+    _, need = _role_suffixes(kind, filing, plan)
+    return any(not any(name.endswith(ending) for name in record["files"]) for ending in need)
 
 
 # ------------------------------------------------------------------
@@ -230,11 +247,15 @@ def _add_financials(cik, ticker, company_name, out_dir, written):
     print("Done!")
 
 
-def _limits_used(plan, written):
-    """Counts for the index's Coverage block, from what is actually there."""
-    used = {kind: len(filings) for kind, filings in plan.items() if kind != RELEASE_KIND}
-    if RELEASE_KIND in plan:
-        used["earnings releases"] = sum(1 for item in written if "press release" in item["section"])
+def _limits_used(plan, records):
+    """
+    Counts for the index's Coverage block, from the filings that actually
+    produced files (a failed download is planned but not counted).
+    """
+    used = {}
+    for kind in plan:
+        key = "earnings releases" if kind == RELEASE_KIND else kind
+        used[key] = sum(1 for rec in records if rec["form"] == kind and rec["files"])
     return used
 
 
@@ -326,7 +347,7 @@ def _banner(title, profile, out_dir, start_year, end_year):
 
 def _finish(plan, written, out_dir, profile, records, company_folder):
     write_index(out_dir, profile["ticker"], profile["company"], written,
-                _limits_used(plan, written), tier=profile["tier"],
+                _limits_used(plan, records), tier=profile["tier"],
                 company_folder=company_folder)
     profile["accessions"] = sorted(records, key=lambda r: r.get("filed", ""), reverse=True)
 
@@ -399,6 +420,11 @@ def refresh_corpus(company_folder, profile):
         removed.extend(remove_files(out_dir, record["files"]))
 
     for kind, filing, record in kept:
+        if needs_reprocessing(kind, filing, plan, record):
+            # Role grew (e.g. this 10-K is now the newest): rebuild it whole.
+            removed.extend(remove_files(out_dir, record["files"]))
+            new.append((kind, filing))
+            continue
         endings = superseded_suffixes(kind, filing, plan)
         stale = [name for name in record["files"] if endings and name.endswith(endings)]
         removed.extend(remove_files(out_dir, stale))

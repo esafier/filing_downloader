@@ -44,10 +44,11 @@ def period_label(report_date, form):
 def write_section(out_dir, filename, meta_fields, body, written):
     """Writes one corpus file and records it for the index."""
     path = out_dir / filename
-    path.write_text(front_matter(meta_fields) + body.strip() + "\n", encoding="utf-8")
+    body = body.strip()
+    path.write_text(front_matter(meta_fields) + body + "\n", encoding="utf-8")
     written.append({
         "filename": filename,
-        "chars": len(body),
+        "chars": len(body),  # same measure read_file_record uses on a refresh
         "section": meta_fields.get("section", ""),
         "form": meta_fields.get("form", ""),
         "period_end": meta_fields.get("period_end", ""),

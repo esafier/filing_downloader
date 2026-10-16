@@ -1,4 +1,4 @@
-# Keep API key private - never share this file
+# Legacy API Ninjas key file (no longer read by the tool; kept private)
 .env
 
 # Python cache files

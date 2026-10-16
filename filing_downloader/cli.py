@@ -66,18 +66,29 @@ def parse_section_list(text):
 
 def run_build(ticker, tier, sections=None, years_back=DEFAULT_YEARS_BACK, root=None):
     """Looks the ticker up, sets up the folder, saves the profile, builds."""
-    root = root or TICKERS_DIR
     ticker = ticker.upper()
-    found = edgar.lookup_company(ticker)
+    try:
+        found = edgar.lookup_company(ticker)
+    except edgar.EdgarError as error:
+        print(f"  ERROR: could not reach SEC EDGAR ({error}).")
+        return False
     if found is None:
         print(f"  ERROR: '{ticker}' is not in the SEC's company list.")
         return False
     cik, company_name = found
+    return build_ticker(ticker, cik, company_name, tier, sections, years_back, root)
 
+
+def build_ticker(ticker, cik, company_name, tier, sections=None,
+                 years_back=DEFAULT_YEARS_BACK, root=None):
+    """
+    The one build path both the CLI and the interactive menu use: resolve
+    the folder, make sure the structure exists, write the profile, build.
+    """
+    root = root or TICKERS_DIR
     company_folder, existed = resolve_company_folder(root, ticker, company_name)
     print(f"\n  {'Found existing' if existed else 'Creating'} folder: {company_folder.name}")
     ensure_canonical_structure(company_folder, ticker, company_name, cik=cik)
-
     profile = new_profile(ticker, company_name, cik, tier, sections, years_back)
     return _build_and_save(company_folder, profile, root)
 
@@ -105,6 +116,8 @@ def cmd_add(args):
     if args.sections and sections is None:
         print(f"  ERROR: could not understand sections '{args.sections}'.")
         return 1
+    if args.light and args.sections:
+        print("  NOTE: --sections is ignored with --light (light tier is financials only).")
     ok = run_build(args.ticker, tier, sections, args.years)
     return 0 if ok else 1
 
@@ -266,11 +279,7 @@ def interactive_one():
                 break
             print("  Enter a number between 1 and 15.")
 
-    company_folder, existed = resolve_company_folder(TICKERS_DIR, ticker, company_name)
-    print(f"\n  {'Found existing' if existed else 'Creating'} folder: {company_folder.name}")
-    ensure_canonical_structure(company_folder, ticker, company_name, cik=cik)
-    profile = new_profile(ticker, company_name, cik, tier, sections, years_back)
-    return _build_and_save(company_folder, profile)
+    return build_ticker(ticker, cik, company_name, tier, sections, years_back)
 
 
 def interactive_main():
