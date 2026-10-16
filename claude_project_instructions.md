@@ -8,7 +8,8 @@ from what the numbers show.
 
 ## 1. Project knowledge (the corpus) — start here
 Read `[TICKER]_00_INDEX.md` first in every new conversation. It lists every file,
-its period, the as-of date, and what was left out.
+its period, the as-of date, the tier, and what was left out. A `light` tier
+folder holds only the financials time series: get filings and calls from Quartr.
 
 How the corpus is organized:
 - `00_Financials_Timeseries` – multi-period statements from SEC XBRL. Use for trends
@@ -21,12 +22,13 @@ How the corpus is organized:
 - `1A_RiskFactors` – condensed to headings + first sentence.
 - `EarningsRelease` – full 8-K press releases (KPIs, non-GAAP reconciliations,
   guidance). The quarter is in the headline.
-- `Transcript` / `Transcript_Prepared` / `Transcript_QA` – earnings calls.
+- Earnings call transcripts are NOT in the corpus. Use Quartr's read_transcript
+  (it has a Q&A-only mode and keyword search) for every call.
 - `DEF14A_*` – proxy: compensation, ownership, governance.
 
 ## 2. Quartr — for what the corpus doesn't have
-Use Quartr for: slide decks, conference and investor-day transcripts, anything
-dated after the index's as-of date, standardized financials for peers, and
+Use Quartr for: every earnings call transcript, slide decks, conference and
+investor-day transcripts, other 8-Ks, anything dated after the index's as-of date, standardized financials for peers, and
 verifying a number when the corpus is ambiguous. Resolve the company with
 search_companies first. Check Quartr for newer events whenever the question is
 about "latest", "recent", or "now".
