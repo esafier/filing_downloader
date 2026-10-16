@@ -10,9 +10,13 @@ from a description of the rule; an index that describes a filter drifts
 away from the filter (tasks/lessons.md).
 """
 
-from datetime import date
+from datetime import date, datetime
 
 from ..config import CORPUS_LIMITS
+
+# Where the project writes its own outputs. Listed in the index so a new
+# conversation knows what has already been written about this name.
+PRIOR_WORK_FOLDERS = ["Memos & Theses", "Earnings/Prep", "Earnings/Reaction", "Models"]
 
 # Everything the corpus does not carry and Quartr does. Shown on every index;
 # a light-tier index is essentially this list plus the financials file.
@@ -33,7 +37,28 @@ QUARTR_ITEMS = [
 ]
 
 
-def write_index(out_dir, ticker, company_name, written, limits_used, tier="full"):
+def list_prior_work(company_folder):
+    """
+    Every file under the output folders, as (relative path, modified date),
+    newest first. Skips Office lock files and hidden/system files.
+    """
+    found = []
+    for sub in PRIOR_WORK_FOLDERS:
+        folder = company_folder / sub
+        if not folder.is_dir():
+            continue
+        for path in folder.rglob("*"):
+            if not path.is_file() or path.name.startswith(("~$", ".")) or path.name.lower() == "desktop.ini":
+                continue
+            modified = datetime.fromtimestamp(path.stat().st_mtime).date().isoformat()
+            found.append((path.relative_to(company_folder).as_posix().replace("/", "\\"), modified))
+    return sorted(found, key=lambda entry: (entry[1], entry[0]), reverse=True)
+
+
+def write_index(out_dir, ticker, company_name, written, limits_used, tier="full",
+                company_folder=None, prior_work=None):
+    if prior_work is None:
+        prior_work = list_prior_work(company_folder if company_folder is not None else out_dir.parent)
     total_chars = sum(item["chars"] for item in written)
     approx_tokens = total_chars // 4
     dates = [item.get("filed", "") for item in written]
@@ -43,6 +68,8 @@ def write_index(out_dir, ticker, company_name, written, limits_used, tier="full"
         f"# {ticker} - {company_name}: corpus index",
         "",
         "Read this first. It lists every document in this project and what it covers.",
+        "`RESEARCH_GUIDE.md` in the folder above says where to look for everything else",
+        "and where to write outputs.",
         "",
         f"- **Tier:** {tier}" + ("  (watchlist name: financials only; use Quartr for filings and calls)"
                                  if tier == "light" else ""),
@@ -73,6 +100,15 @@ def write_index(out_dir, ticker, company_name, written, limits_used, tier="full"
     if tier == "light":
         lines += [f"- {item}" for item in LIGHT_TIER_QUARTR_ITEMS]
     lines += [f"- {item}" for item in QUARTR_ITEMS]
+
+    lines += ["", "## Prior work in this folder", "",
+              "Memos, earnings notes and models already written for this name. Read the",
+              "relevant ones before starting new work so views stay consistent.", ""]
+    if prior_work:
+        lines += ["| File | Modified |", "| --- | --- |"]
+        lines += [f"| `{name}` | {modified} |" for name, modified in prior_work]
+    else:
+        lines.append("- (none yet)")
     lines.append("")
 
     (out_dir / f"{ticker}_00_INDEX.md").write_text("\n".join(lines), encoding="utf-8")

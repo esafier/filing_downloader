@@ -7,6 +7,11 @@ or a scheduled refresh never has to ask. Two tiers:
   light  folder + links + financials time series + index routing everything
          else to Quartr. For names on the watchlist you are not deep in.
   full   the corpus: filing sections, proxy, releases, financials.
+
+"accessions" is the manifest the weekly refresh diffs against: one record
+per filing in the corpus, {accession, form, report_date, filed, files},
+where files are the section files that filing produced. A filing whose
+accession is recorded and whose files are present is never re-downloaded.
 """
 
 import json
@@ -38,7 +43,18 @@ def new_profile(ticker, company, cik, tier, sections=None, years_back=DEFAULT_YE
         "years_back": int(years_back),
         "created": today,
         "last_run": None,
-        "accessions": [],            # Phase 2: filings already in the corpus
+        "accessions": [],            # filled by build/refresh, see accession_record
+    }
+
+
+def accession_record(kind, filing, files):
+    """One manifest entry: which corpus files came from which filing."""
+    return {
+        "accession": filing["accession"],
+        "form": kind,
+        "report_date": filing.get("report_date", ""),
+        "filed": filing.get("filing_date", ""),
+        "files": list(files),
     }
 
 

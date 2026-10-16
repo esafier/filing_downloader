@@ -22,3 +22,6 @@ dist/
 
 # Downloaded EDGAR index files (data, not code)
 *.idx
+
+# Weekly refresh console output (Run_Weekly_Refresh.bat)
+refresh_console.log

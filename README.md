@@ -27,11 +27,59 @@ python downloader.py rebuild NVDA
 ```
 
 ```bash
+python downloader.py refresh NVDA
+```
+
+```bash
+python downloader.py refresh --all
+```
+
+```bash
 python downloader.py list
 ```
 
 Set `TICKERS_ROOT` to point the output somewhere else (used by the tests and
 golden runs). No API keys are needed; everything comes from SEC EDGAR.
+
+`rebuild` wipes the corpus folder and rebuilds it. `refresh` is incremental:
+it compares EDGAR with the accession manifest in `_ticker.json`, downloads
+only new filings, keeps existing section files under the same names, removes
+the files of any filing that fell outside the caps, and regenerates the
+financials time series and the index. Light-tier folders refresh only the
+financials and the index. One line per ticker is appended to
+`Tickers\_refresh_log.txt` (date, ticker, added, removed, errors, file names)
+and printed at the end; one ticker failing never stops the others.
+
+## Weekly refresh (Task Scheduler)
+
+`Run_Weekly_Refresh.bat` runs `refresh --all` unattended (no pause) and
+appends console output to `refresh_console.log` next to it. Register it once
+from a normal (non-admin) PowerShell or Command Prompt:
+
+```bash
+schtasks /Create /TN "Filing Downloader Weekly Refresh" /TR "\"C:\Users\ely\Code\Filing_downloader\Run_Weekly_Refresh.bat\"" /SC WEEKLY /D SAT /ST 07:00
+```
+
+Check it with `schtasks /Query /TN "Filing Downloader Weekly Refresh"`, run
+it now with `schtasks /Run /TN "..."`, remove it with `schtasks /Delete /TN
+"..." /F`. The PC has to be awake at the scheduled time; if it often is not,
+open Task Scheduler, find the task, and on the Settings tab tick "Run task as
+soon as possible after a scheduled start is missed".
+
+GUI alternative: Task Scheduler > Create Basic Task > name it > Weekly, pick a
+day and time > Start a program > browse to `Run_Weekly_Refresh.bat` > Finish.
+
+## RESEARCH_GUIDE.md
+
+Every ticker folder carries a `RESEARCH_GUIDE.md`: a routing table (what to
+read locally, what to ask Quartr, what to look up on the web), the folder
+layout, citation rules and where to write outputs. It is copied from the
+master `Tickers\_RESEARCH_GUIDE.md` on every add, rebuild and refresh with
+the ticker, company, tier and date filled in. Edit the master to change every
+folder on the next refresh; the master is created from the template in
+`filing_downloader/guide.py` if it is missing. The index also lists the files
+already in `Memos & Theses`, `Earnings\Prep`, `Earnings\Reaction` and
+`Models` so a new conversation knows its prior work.
 
 ## Tiers
 
@@ -46,8 +94,11 @@ A ticker can start light and be upgraded later with `add TICKER --full`.
 
 ```
 Tickers\
+  _RESEARCH_GUIDE.md           master guide, copied into every ticker folder
+  _refresh_log.txt             one line per ticker per refresh
   NVDA - NVIDIA Corp\
-    _ticker.json                 profile: tier, sections, years, last run
+    RESEARCH_GUIDE.md            routing: local vs Quartr vs web, where to write outputs
+    _ticker.json                 profile: tier, sections, years, last run, accession manifest
     _Links.md
     Claude Project Knowledge\    the corpus (connect this folder's parent to the project)
       NVDA_00_INDEX.md           read first: files, as-of date, what is in Quartr instead
@@ -86,6 +137,5 @@ Package layout: `filing_downloader/` with `edgar.py` (SEC client),
 `profile.py`, `scaffold.py`, `cli.py`, and `corpus/` (HTML conversion,
 splitters, financials, index, build driver). `downloader.py` is a thin shim.
 
-Roadmap: Phase 2 incremental `refresh` + Task Scheduler job + per-folder
-`RESEARCH_GUIDE.md`; Phase 3 foreign filers (20-F, 40-F, 6-K); Phase 4
-amendments, broader 8-K coverage, keep-original-HTML option.
+Roadmap: Phase 3 foreign filers (20-F, 40-F, 6-K); Phase 4 amendments,
+broader 8-K coverage, keep-original-HTML option.
