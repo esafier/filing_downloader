@@ -1,8 +1,9 @@
 # Filing Downloader
 
 Builds one research folder per ticker under `OneDrive\Tickers`, with a compact
-Markdown corpus of SEC filings. Each ticker folder is connected live to a
-Claude (or ChatGPT) project; the project also has the Quartr MCP, which covers
+Markdown corpus of SEC filings. Each ticker folder is added to a claude.ai
+project as context ("Add context" > OneDrive > the ticker folder), so the
+project sees it live; the project also has the Quartr MCP, which covers
 everything the corpus deliberately leaves out (transcripts, slides, 8-Ks,
 anything newer than the corpus).
 
@@ -108,7 +109,7 @@ Tickers\
     RESEARCH_GUIDE.md            routing: local vs Quartr vs web, where to write outputs
     _ticker.json                 profile: tier, sections, years, last run, accession manifest
     _Links.md
-    Claude Project Knowledge\    the corpus (connect this folder's parent to the project)
+    Claude Project Knowledge\    the corpus (add this folder's parent to the project)
       NVDA_00_INDEX.md           read first: files, as-of date, what is in Quartr instead
       NVDA_00_Financials_Timeseries.md
       NVDA_FYE2026-01-25_10-K_07_MDA.md ...
@@ -137,8 +138,10 @@ Alongside these, my own notes and Current view in Open Brain (stock folder
 `$ticker`), read first and treated as views, not facts.
 
 `claude_project_instructions.md` has the one-time account preference that
-points every project at its `RESEARCH_GUIDE.md`, so new projects need no
-pasted instructions, plus an optional ticker-free backup prompt.
+points every project at its `RESEARCH_GUIDE.md`, so no project needs pasted
+instructions, plus an optional ticker-free backup prompt. Add the ticker
+folder itself as context, not just `Claude Project Knowledge`, or the guide
+is left out.
 
 ## Development
 
