@@ -140,15 +140,38 @@ def superseded_suffixes(kind, filing, plan):
     return _role_suffixes(kind, filing, plan)[0]
 
 
+def filing_role(kind, filing, plan):
+    """
+    What this filing is asked to contribute in its current position:
+    {"business": newest 10-K, so Item 1 is wanted; "notes": full notes wanted}.
+    Stored in the manifest so a later refresh can tell a role that GREW from
+    a filing that simply never yields those files.
+    """
+    skip_items, include_notes = filing_flags(kind, filing, plan)
+    return {"business": kind == "10-K" and not skip_items,
+            "notes": kind in ("10-K", "10-Q") and include_notes}
+
+
 def needs_reprocessing(kind, filing, plan, record):
     """
-    True when a kept filing's role grew (it became the newest 10-K, or a
-    10-Q now outranks the newest 10-K) and the files that role requires are
-    not in its record. The whole filing is then re-downloaded, since the
-    section text is not kept locally.
+    True when a kept filing's role grew since it was built (it became the
+    newest 10-K, or a 10-Q now outranks the newest 10-K). The whole filing
+    is then re-downloaded, since the section text is not kept locally.
+
+    Decided from the role recorded at build time, NOT from which files
+    exist: some filings never produce a Notes or Business file (no notes
+    heading found, or the filing could not be split and is kept _Full), and
+    checking files re-downloaded those every single week.
+
+    A record from before roles were stored is assumed to match its current
+    role, which is what the build that wrote it used.
     """
-    _, need = _role_suffixes(kind, filing, plan)
-    return any(not any(name.endswith(ending) for name in record["files"]) for ending in need)
+    current = filing_role(kind, filing, plan)
+    built = record.get("role")
+    if built is None:
+        record["role"] = current
+        return False
+    return any(current[key] and not built.get(key, False) for key in current)
 
 
 # ------------------------------------------------------------------
@@ -209,7 +232,7 @@ def _process_planned(plan, ticker, company_name, out_dir, todo, written, records
         written.extend(files)
         names = [item["filename"] for item in files]
         added.extend(names)
-        records.append(accession_record(kind, filing, names))
+        records.append(accession_record(kind, filing, names, role=filing_role(kind, filing, plan)))
         if files:
             print(f"Done ({len(files)} file(s))")
         elif kind != RELEASE_KIND:
@@ -429,6 +452,7 @@ def refresh_corpus(company_folder, profile):
         stale = [name for name in record["files"] if endings and name.endswith(endings)]
         removed.extend(remove_files(out_dir, stale))
         record["files"] = [name for name in record["files"] if name not in stale]
+        record["role"] = filing_role(kind, filing, plan)  # a shrunk role is the new baseline
         written.extend(read_file_record(out_dir / name) for name in record["files"])
         records.append(record)
 

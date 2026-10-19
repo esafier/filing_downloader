@@ -47,15 +47,21 @@ def new_profile(ticker, company, cik, tier, sections=None, years_back=DEFAULT_YE
     }
 
 
-def accession_record(kind, filing, files):
-    """One manifest entry: which corpus files came from which filing."""
-    return {
+def accession_record(kind, filing, files, role=None):
+    """
+    One manifest entry: which corpus files came from which filing, and the
+    role it was built for ({"business", "notes"}, see build.filing_role).
+    """
+    record = {
         "accession": filing["accession"],
         "form": kind,
         "report_date": filing.get("report_date", ""),
         "filed": filing.get("filing_date", ""),
         "files": list(files),
     }
+    if role is not None:
+        record["role"] = dict(role)
+    return record
 
 
 def load_profile(company_folder):
