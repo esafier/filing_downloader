@@ -286,3 +286,40 @@ def test_kept_10q_regains_notes_when_the_newer_10k_falls_away(ticker_folder):
     assert (ticker_folder["corpus"] / "TST_QE2025-09-30_10-Q_Notes.md").exists()
     q1_record = next(r for r in profile["accessions"] if r["accession"] == "Q1")
     assert any(name.endswith("_10-Q_Notes.md") for name in q1_record["files"])
+
+
+# ------------------------------------------------------------------
+# Regression (2026-10-18 weekly run): a filing that never yields a Notes
+# or Business file (notes heading not found, or kept as _Full) must not be
+# re-downloaded every week.
+# ------------------------------------------------------------------
+
+def test_filing_without_notes_file_is_not_reprocessed_every_refresh(ticker_folder, monkeypatch):
+    def stub_no_notes(kind, f, ticker, company, out_dir, plan):
+        records = stub_process_one(kind, f, ticker, company, out_dir, plan)
+        for item in [r for r in records if r["filename"].endswith("_08N_Notes.md")]:
+            (out_dir / item["filename"]).unlink()
+            records.remove(item)
+        return records
+
+    monkeypatch.setattr(build, "process_one", stub_no_notes)
+    k1 = filing("10-K", "K1", "2025-12-31")
+    ticker_folder["plan"] = {"10-K": [k1]}
+    profile = ticker_folder["profile"]
+
+    first = build.refresh_corpus(ticker_folder["folder"], profile)
+    assert "TST_FYE2025-12-31_10-K_07_MDA.md" in first["added"]
+    second = build.refresh_corpus(ticker_folder["folder"], profile)
+    assert second == {"added": [], "removed": [], "errors": []}
+
+
+def test_old_manifest_without_roles_is_not_mass_reprocessed(ticker_folder):
+    k1 = filing("10-K", "K1", "2025-12-31")
+    ticker_folder["plan"] = {"10-K": [k1]}
+    profile = ticker_folder["profile"]
+    build.refresh_corpus(ticker_folder["folder"], profile)
+    for record in profile["accessions"]:
+        record.pop("role")  # what a pre-fix _ticker.json looks like
+    summary = build.refresh_corpus(ticker_folder["folder"], profile)
+    assert summary["added"] == [] and summary["removed"] == []
+    assert profile["accessions"][0]["role"] == {"business": True, "notes": True}
