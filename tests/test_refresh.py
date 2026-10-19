@@ -323,3 +323,35 @@ def test_old_manifest_without_roles_is_not_mass_reprocessed(ticker_folder):
     summary = build.refresh_corpus(ticker_folder["folder"], profile)
     assert summary["added"] == [] and summary["removed"] == []
     assert profile["accessions"][0]["role"] == {"business": True, "notes": True}
+
+
+# ------------------------------------------------------------------
+# Start-here file: written next to the guide, never touches user files
+# ------------------------------------------------------------------
+
+def test_start_here_written_with_guide_and_user_files_untouched(tmp_path):
+    from filing_downloader.guide import START_FILENAME, MASTER_START_FILENAME
+    folder = tmp_path / "TST - Test Co"
+    folder.mkdir()
+    (folder / "CLAUDE.md").write_text("my own notes", encoding="utf-8")
+    (folder / "AGENTS.md").write_text("my agent notes", encoding="utf-8")
+    profile = new_profile("TST", "Test Co", 1, "light")
+
+    write_ticker_guide(tmp_path, folder, profile, as_of="2026-10-19")
+
+    start = (folder / START_FILENAME).read_text(encoding="utf-8")
+    assert start.startswith("# Start here - TST (Test Co)")
+    assert "RESEARCH_GUIDE.md" in start and "TST_00_INDEX.md" in start
+    assert "tier (light)" in start and "{" not in start
+    assert (tmp_path / MASTER_START_FILENAME).exists()
+    assert (folder / "CLAUDE.md").read_text(encoding="utf-8") == "my own notes"
+    assert (folder / "AGENTS.md").read_text(encoding="utf-8") == "my agent notes"
+
+
+def test_edited_master_start_flows_into_folders(tmp_path):
+    from filing_downloader.guide import START_FILENAME, MASTER_START_FILENAME
+    (tmp_path / MASTER_START_FILENAME).write_text("Custom for {ticker}", encoding="utf-8")
+    folder = tmp_path / "TST - Test Co"
+    folder.mkdir()
+    write_ticker_guide(tmp_path, folder, new_profile("TST", "Test Co", 1, "light"))
+    assert (folder / START_FILENAME).read_text(encoding="utf-8") == "Custom for TST"

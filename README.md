@@ -81,6 +81,17 @@ folder on the next refresh; the master is created from the template in
 already in `Memos & Theses`, `Earnings\Prep`, `Earnings\Reaction` and
 `Models` so a new conversation knows its prior work.
 
+## 00_START_HERE.md and project instructions
+
+Every ticker folder also carries `00_START_HERE.md`: the analyst role, the
+"read RESEARCH_GUIDE.md and the index first" steps, and the analysis and style
+rules. It is copied from `Tickers\_00_START_HERE.md` the same way as the
+guide. Because it lives in the folder, projects need no instructions of their
+own: one paragraph in your Claude and ChatGPT account preferences points every
+project at it. The paragraph, and where to paste it, is in
+`claude_project_instructions.md`. A `CLAUDE.md` or `AGENTS.md` you write in a
+ticker folder is never touched.
+
 ## Tiers
 
 | Tier | What you get | For |
@@ -94,9 +105,11 @@ A ticker can start light and be upgraded later with `add TICKER --full`.
 
 ```
 Tickers\
+  _00_START_HERE.md            master start-here file, copied into every ticker folder
   _RESEARCH_GUIDE.md           master guide, copied into every ticker folder
   _refresh_log.txt             one line per ticker per refresh
   NVDA - NVIDIA Corp\
+    00_START_HERE.md             read first: role, steps, style (sorts to the top)
     RESEARCH_GUIDE.md            routing: local vs Quartr vs web, where to write outputs
     _ticker.json                 profile: tier, sections, years, last run, accession manifest
     _Links.md
