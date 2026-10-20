@@ -1,8 +1,9 @@
 # Filing Downloader
 
 Builds one research folder per ticker under `OneDrive\Tickers`, with a compact
-Markdown corpus of SEC filings. Each ticker folder is connected live to a
-Claude (or ChatGPT) project; the project also has the Quartr MCP, which covers
+Markdown corpus of SEC filings. Each ticker folder is added to a claude.ai
+project as context ("Add context" > OneDrive > the ticker folder), so the
+project sees it live; the project also has the Quartr MCP, which covers
 everything the corpus deliberately leaves out (transcripts, slides, 8-Ks,
 anything newer than the corpus).
 
@@ -71,13 +72,21 @@ day and time > Start a program > browse to `Run_Weekly_Refresh.bat` > Finish.
 
 ## RESEARCH_GUIDE.md
 
-Every ticker folder carries a `RESEARCH_GUIDE.md`: a routing table (what to
-read locally, what to ask Quartr, what to look up on the web), the folder
-layout, citation rules and where to write outputs. It is copied from the
-master `Tickers\_RESEARCH_GUIDE.md` on every add, rebuild and refresh with
-the ticker, company, tier and date filled in. Edit the master to change every
+Every ticker folder carries a `RESEARCH_GUIDE.md`, and it is the project's
+full set of instructions: role, where to start, a routing table (what to read
+locally, what to ask Quartr, what to look up on the web), source order, how
+to use my notes in Open Brain, how to analyze, style, the folder layout,
+citation rules and where to write outputs. It is copied from the master
+`Tickers\_RESEARCH_GUIDE.md` on every add, rebuild and refresh with the
+ticker, company, tier and date filled in. Edit the master to change every
 folder on the next refresh; the master is created from the template in
-`filing_downloader/guide.py` if it is missing. The index also lists the files
+`filing_downloader/guide.py` if it is missing.
+
+When the template gains a new `## ` section, the next add, rebuild or
+refresh inserts it into the existing master (in template order) and prints
+`Master guide: added ...`. Sections already in the master are never
+touched, so hand edits survive. To switch a section off, keep its heading
+and empty its body; deleting the heading brings it back. The index also lists the files
 already in `Memos & Theses`, `Earnings\Prep`, `Earnings\Reaction` and
 `Models` so a new conversation knows its prior work.
 
@@ -100,7 +109,7 @@ Tickers\
     RESEARCH_GUIDE.md            routing: local vs Quartr vs web, where to write outputs
     _ticker.json                 profile: tier, sections, years, last run, accession manifest
     _Links.md
-    Claude Project Knowledge\    the corpus (connect this folder's parent to the project)
+    Claude Project Knowledge\    the corpus (add this folder's parent to the project)
       NVDA_00_INDEX.md           read first: files, as-of date, what is in Quartr instead
       NVDA_00_Financials_Timeseries.md
       NVDA_FYE2026-01-25_10-K_07_MDA.md ...
@@ -125,7 +134,14 @@ sentence; MD&A is verbatim; notes are kept in full for the newest reports.
    as-of date.
 3. Exa or web for the outside view.
 
-`claude_project_instructions.md` is the prompt to paste into the project.
+Alongside these, my own notes and Current view in Open Brain (stock folder
+`$ticker`), read first and treated as views, not facts.
+
+`claude_project_instructions.md` has the one-time account preference that
+points every project at its `RESEARCH_GUIDE.md`, so no project needs pasted
+instructions, plus an optional ticker-free backup prompt. Add the ticker
+folder itself as context, not just `Claude Project Knowledge`, or the guide
+is left out.
 
 ## Development
 

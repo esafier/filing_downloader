@@ -12,6 +12,7 @@ from filing_downloader.corpus.index import list_prior_work, write_index
 from filing_downloader.config import CORPUS_FOLDER_NAME
 from filing_downloader.profile import new_profile, accession_record
 from filing_downloader.guide import (ensure_master_guide, render_guide, write_ticker_guide,
+                                     add_missing_sections,
                                      MASTER_GUIDE_FILENAME, GUIDE_FILENAME, GUIDE_TEMPLATE)
 
 
@@ -211,6 +212,67 @@ def test_guide_master_created_once_and_substituted(tmp_path):
     assert "Tier: **light**" in text and "2026-10-16" in text and "NVIDIA Corp" in text
     for token in ("{ticker}", "{company}", "{tier}", "{as_of}", "{corpus_folder}"):
         assert token not in text
+
+
+def test_guide_carries_open_brain_lookups():
+    text = render_guide(GUIDE_TEMPLATE, "CBOE", "Cboe Global Markets", "full", "2026-10-19")
+    assert "## My notes in Open Brain" in text
+    assert 'tag:"$cboe"' in text and 'ticker:"CBOE"' in text
+
+
+OLD_MASTER = """# Research guide - {ticker}
+
+Intro line.
+
+## Where to look
+
+table
+
+## Folder layout
+
+layout
+
+## Citation rules
+
+my edited citation rules
+
+## Where to write outputs
+
+outputs
+House rule for {ticker}.
+"""
+
+
+def test_missing_sections_added_in_template_order_and_edits_kept():
+    template = ("# T\n\n## A\n\na\n\n## Where to look\n\nnew table\n\n## B\n\nb\n\n"
+                "## Folder layout\n\nx\n\n## Citation rules\n\nx\n\n## Where to write outputs\n\nx\n\n"
+                "## C\n\nc\n")
+    text, added = add_missing_sections(OLD_MASTER, template)
+    assert added == ["## A", "## B", "## C"]
+    headings = [line for line in text.splitlines() if line.startswith("## ")]
+    assert headings == ["## A", "## Where to look", "## B", "## Folder layout", "## Citation rules",
+                        "## Where to write outputs", "## C"]
+    # existing sections are left exactly as edited, including the old table
+    assert "my edited citation rules" in text and "House rule for {ticker}." in text
+    assert "new table" not in text
+    assert text.startswith("# Research guide - {ticker}\n\nIntro line.\n\n## A")
+    # second pass is a no-op
+    assert add_missing_sections(text, template) == (text, [])
+
+
+def test_existing_master_upgraded_once(tmp_path):
+    master = tmp_path / MASTER_GUIDE_FILENAME
+    master.write_text(OLD_MASTER, encoding="utf-8")
+    ensure_master_guide(tmp_path)
+    upgraded = master.read_text(encoding="utf-8")
+    assert "## My notes in Open Brain" in upgraded and "House rule for {ticker}." in upgraded
+    ensure_master_guide(tmp_path)
+    assert master.read_text(encoding="utf-8") == upgraded
+
+
+def test_up_to_date_master_not_rewritten(tmp_path):
+    master = ensure_master_guide(tmp_path)
+    assert add_missing_sections(master.read_text(encoding="utf-8")) == (GUIDE_TEMPLATE, [])
 
 
 def test_render_guide_leaves_unknown_braces_alone():
