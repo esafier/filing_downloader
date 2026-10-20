@@ -10,8 +10,7 @@ preference tells Claude to read it, so no project needs pasted instructions.
 
 ## 1. Account preference (once, covers every project)
 
-claude.ai > Settings > Profile > "What personal preferences should Claude
-consider in responses?" Add:
+claude.ai > Settings > Profile > "Instructions for Claude". Add:
 
 ```
 When a project's files include a RESEARCH_GUIDE.md (from a ticker folder I added as context), read it before answering anything in that project and follow it. It is my standing instructions for that project.
